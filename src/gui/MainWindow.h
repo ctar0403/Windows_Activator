@@ -30,6 +30,7 @@ private:
     void ApplyFont(HWND control) const;
     void OpenActivationSettings();
     void StartRefresh();
+    void StartActivation(bool kms);
     void FinishRefresh(SnapshotQueryResult result);
     void SetBusy(bool busy);
     void ShowDiagnostics();

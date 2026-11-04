@@ -1,0 +1,26 @@
+name: Windows build
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure x64
+        run: cmake -S . -B build/ci -A x64 -DBUILD_TESTING=ON
+      - name: Build GUI, helper, and tests
+        run: cmake --build build/ci --config Release --parallel
+      - name: Run tests without activation
+        run: ctest --test-dir build/ci -C Release --output-on-failure
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WinActivate-x64
+          path: |
+            build/ci/Release/WinActivate.exe
+            build/ci/Release/WinActivateHelper.exe
+            README.md
+            docs/

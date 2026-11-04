@@ -38,6 +38,10 @@ struct LicenseRecord {
     std::uint32_t licenseStatusReason{};
     std::optional<std::wstring> partialKey;
     bool isAddon{};
+    std::optional<std::uint32_t> gracePeriodMinutes;
+    std::wstring kmsHost;
+    std::wstring discoveredKmsHost;
+    std::optional<std::uint32_t> kmsPort;
 };
 
 enum class LicenseSummaryStatus {

@@ -89,18 +89,77 @@ HRESULT WmiConnection::Query(
         return result;
     }
 
+    const ULONGLONG deadline = GetTickCount64() + 60000;
     for (;;) {
         Microsoft::WRL::ComPtr<IWbemClassObject> object;
         ULONG returned = 0;
-        result = enumerator->Next(WBEM_INFINITE, 1, &object, &returned);
+        result = enumerator->Next(10000, 1, &object, &returned);
         if (FAILED(result)) {
             return result;
+        }
+        if (result == WBEM_S_TIMEDOUT) {
+            if (GetTickCount64() >= deadline) return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+            continue;
         }
         if (returned == 0) {
             return S_OK;
         }
         results.push_back(std::move(object));
     }
+}
+
+BackendCallResult WmiConnection::CallMethod(
+    std::wstring_view path, const wchar_t* method,
+    const wchar_t* parameter, const VARIANT* value) const {
+    auto failure = [](HRESULT hr) {
+        return BackendCallResult{false, static_cast<std::int32_t>(hr), {}};
+    };
+    if (FAILED(status_)) return failure(status_);
+    UniqueBstr objectPath(path);
+    UniqueBstr methodName(method);
+    if (!objectPath.valid() || !methodName.valid()) return failure(E_OUTOFMEMORY);
+    Microsoft::WRL::ComPtr<IWbemClassObject> input;
+    HRESULT hr = S_OK;
+    if (parameter != nullptr && value != nullptr) {
+        Microsoft::WRL::ComPtr<IWbemClassObject> object, classObject, definition;
+        hr = services_->GetObject(objectPath.get(), 0, nullptr, &object, nullptr);
+        // GetMethod requires a CIM class definition, not an instance pointer.
+        // ExecMethod below still targets the selected instance path.
+        VARIANT className;
+        VariantInit(&className);
+        if (SUCCEEDED(hr)) hr = object->Get(L"__CLASS", 0, &className, nullptr, nullptr);
+        if (SUCCEEDED(hr) && (className.vt != VT_BSTR || className.bstrVal == nullptr)) {
+            hr = WBEM_E_TYPE_MISMATCH;
+        }
+        if (SUCCEEDED(hr)) hr = services_->GetObject(className.bstrVal, 0, nullptr, &classObject, nullptr);
+        VariantClear(&className);
+        if (SUCCEEDED(hr)) hr = classObject->GetMethod(method, 0, &definition, nullptr);
+        if (SUCCEEDED(hr) && !definition) hr = WBEM_E_INVALID_METHOD_PARAMETERS;
+        if (SUCCEEDED(hr)) hr = definition->SpawnInstance(0, &input);
+        if (SUCCEEDED(hr)) hr = input->Put(parameter, 0, const_cast<VARIANT*>(value), 0);
+        if (FAILED(hr)) return failure(hr);
+    }
+    Microsoft::WRL::ComPtr<IWbemCallResult> pending;
+    hr = services_->ExecMethod(objectPath.get(), methodName.get(),
+        WBEM_FLAG_RETURN_IMMEDIATELY, nullptr, input.Get(), nullptr, &pending);
+    if (FAILED(hr)) return failure(hr);
+    if (!pending) return failure(E_UNEXPECTED);
+    Microsoft::WRL::ComPtr<IWbemClassObject> output;
+    hr = pending->GetResultObject(90000, &output);
+    if (hr == WBEM_S_TIMEDOUT) return failure(HRESULT_FROM_WIN32(ERROR_TIMEOUT));
+    if (FAILED(hr)) return failure(hr);
+    if (!output) return failure(E_UNEXPECTED);
+    VARIANT code;
+    VariantInit(&code);
+    hr = output->Get(L"ReturnValue", 0, &code, nullptr, nullptr);
+    if (FAILED(hr)) { VariantClear(&code); return failure(hr); }
+    if (code.vt != VT_I4 && code.vt != VT_UI4) {
+        VariantClear(&code);
+        return failure(WBEM_E_TYPE_MISMATCH);
+    }
+    const auto result = code.vt == VT_I4 ? static_cast<std::uint32_t>(code.lVal) : code.ulVal;
+    VariantClear(&code);
+    return {result == 0, {}, result};
 }
 
 }  // namespace winactivate

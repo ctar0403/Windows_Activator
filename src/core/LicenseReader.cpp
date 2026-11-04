@@ -35,7 +35,7 @@ HRESULT ReadString(IWbemClassObject* object, const wchar_t* property,
     ScopedVariant value;
     const HRESULT result = object->Get(property, 0, value.put(), nullptr, nullptr);
     if (FAILED(result)) {
-        return optional && result == WBEM_E_NOT_FOUND ? S_OK : result;
+        return optional && result == static_cast<HRESULT>(WBEM_E_NOT_FOUND) ? S_OK : result;
     }
     if (value.get().vt == VT_NULL || value.get().vt == VT_EMPTY) {
         output.clear();
@@ -125,6 +125,15 @@ HRESULT ParseLicenseRecord(IWbemClassObject* object, LicenseRecord& record) {
     if (SUCCEEDED(result) && !partialKey.empty()) {
         record.partialKey = std::move(partialKey);
     }
+    // Optional diagnostics must never turn an absent field into a false expiry.
+    std::uint32_t minutes = 0;
+    if (SUCCEEDED(ReadUint32(object, L"GracePeriodRemaining", minutes))) {
+        record.gracePeriodMinutes = minutes;
+    }
+    static_cast<void>(ReadString(object, L"KeyManagementServiceMachine", record.kmsHost, true));
+    static_cast<void>(ReadString(object, L"DiscoveredKeyManagementServiceMachineName", record.discoveredKmsHost, true));
+    std::uint32_t port = 0;
+    if (SUCCEEDED(ReadUint32(object, L"KeyManagementServicePort", port))) record.kmsPort = port;
     return result;
 }
 
@@ -146,7 +155,7 @@ SnapshotQueryResult WmiLicensingBackend::QuerySnapshot() {
         osObjects);
     if (FAILED(queryResult) || osObjects.size() != 1) {
         result.error = QueryError(
-            FAILED(queryResult) ? queryResult : WBEM_E_FAILED,
+            FAILED(queryResult) ? queryResult : static_cast<HRESULT>(WBEM_E_FAILED),
             L"The operating-system record could not be read unambiguously.");
         return result;
     }

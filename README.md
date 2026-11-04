@@ -1,21 +1,38 @@
 # WinActivate Manager
 
-WinActivate Manager is a local-only native Windows desktop application for
-inspecting Windows licensing and activating genuine Windows 10 or Windows 11
-licenses. It does not generate product keys, bypass Microsoft activation, alter
-KMS configuration, or communicate with any third-party service.
+Native Windows 10/11 x64 desktop app for company KMS activation and renewal.
+Members do not need to enter a personal product key. The app uses documented
+Windows licensing APIs and your organization's activation infrastructure.
 
-> Development status: phases 1–3 are implemented. The application has a native
-> Win32 shell, read-only WMI OS/license discovery, deterministic product
-> selection, and a mock-tested activation workflow. The elevated helper, secure
-> IPC, and real WMI mutation methods are not implemented yet, so this revision
-> intentionally cannot install a key or request activation.
+## Use
 
-[Download WinActivate](https://github.com/ctar0403/Windows_Activation/releases/download/runnable/WinActivate.exe)
+1. Keep `WinActivate.exe` and `WinActivateHelper.exe` in the same folder.
+2. Connect to your company network or VPN and open `WinActivate.exe` normally.
+3. Leave the company server blank to use current Windows KMS configuration or
+   DNS discovery. Alternatively enter your IT team's hostname and port (default
+   `1688`). An entered host updates that Windows product's KMS configuration.
+4. Click **Activate / renew with KMS** and approve the administrator prompt.
+5. Check the freshly read status and **KMS validity**. Diagnostics shows the
+   configured/discovered server, remaining time and exact Windows error codes.
+
+For an unactivated supported edition, the app installs Microsoft's public KMS
+client setup key for the existing edition when needed. It preserves working
+retail/OEM/MAK activation and can renew an already activated KMS client.
+
+KMS activation is normally valid for 180 days and Windows requests renewal
+automatically. The app displays the remaining time reported by Windows rather
+than promising a fixed 180 days. The company supplies the volume licensing
+entitlement; a public setup key alone is not a license. See
+[Microsoft's KMS documentation](https://learn.microsoft.com/windows-server/get-started/activation-troubleshoot-kms-general)
+and [public client setup keys](https://learn.microsoft.com/windows-server/get-started/kms-client-activation-keys).
+No public KMS server is preconfigured by this app.
 
 ## Supported systems
 
 - Windows 10 or Windows 11 client/workstation, x64
+- Automatic setup-key installation: Pro / N, Pro for Workstations / N,
+  Education / N, Enterprise / N (non-LTSC)
+- Home cannot use KMS; the app does not upgrade editions
 - Windows Server, Windows 8/8.1, and x86 are not supported
 - Visual Studio 2022 or newer with Desktop development with C++
 - Windows 10 or Windows 11 SDK
@@ -28,9 +45,10 @@ edition and any applicable Microsoft program.
 
 The easiest option is to double-click `build.cmd`. It configures an x64 Release
 build, compiles the application, runs the mock-backed tests, and copies the
-preview executable to `dist\WinActivate.exe`. The script prefers the required
+executables to `dist\WinActivate.exe` and `dist\WinActivateHelper.exe`. Keep both
+files together. The script prefers the required
 Visual Studio/CMake toolchain. If only MinGW is installed, it can create a local
-interface-preview build, but that fallback is not a release-validation build.
+test build, but that fallback is not a release-validation build.
 
 From a terminal, the equivalent convenient command is:
 
@@ -51,17 +69,27 @@ ctest --preset release
 The CMake Release application is written beneath
 `build/vs2022-x64/Release`. `build.cmd` additionally copies it to `dist`.
 
-The current preview is read-only: status refresh, diagnostics, and the official
-Windows Activation Settings link work, while the two activation buttons remain
-disabled until the elevated helper and authenticated IPC are implemented.
+The GUI runs without administrator privileges. Clicking an activation button
+starts the separate elevated helper using authenticated local IPC. **Activate
+existing license** uses the installed entitlement without changing KMS settings.
+Personal product-key input has been replaced by company KMS controls.
+
+Automated tests use fake licensing backends and local pipe transport. They never
+install a key or request activation. Live company KMS, UAC, high DPI and agreement
+with Windows Settings require manual testing on an authorized device.
 
 ## Safety and privacy
 
-The application accepts only a key the user already owns. It has no telemetry,
-backend, account login, or key-validation service. A product key is never put in
-command-line arguments, environment variables, files, logs, the registry, or
-error dialogs. See [Security](docs/SECURITY.md) and
-[Troubleshooting](docs/TROUBLESHOOTING.md).
+The application has no telemetry, backend, account login, scheduled task, or
+silent shell commands. The GUI independently rereads Windows status after each
+operation, including failures. Key or server changes made by Windows can persist
+even if activation subsequently fails; refresh and contact IT before retrying.
+
+Local builds are **unsigned** unless your company signs both executables. For
+company distribution, IT should sign both files with its trusted publisher
+certificate. The app does not certify KMS server operators or license entitlement
+and does not label unsigned builds as Microsoft-verified. See
+[Security](docs/SECURITY.md) and [Troubleshooting](docs/TROUBLESHOOTING.md).
 
 Real activation testing must be performed only on an owned or explicitly
 authorized Windows device using a legitimate license. Automated tests never

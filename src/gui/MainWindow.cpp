@@ -1,6 +1,8 @@
 #include "gui/MainWindow.h"
 
 #include "common/FormatError.h"
+#include "common/HelperTransport.h"
+#include "common/KmsOptions.h"
 #include "core/LicenseReader.h"
 #include "core/ProductSelection.h"
 #include "gui/resource.h"
@@ -20,6 +22,12 @@ namespace {
 constexpr wchar_t kWindowClass[] = L"WinActivateManager.MainWindow";
 constexpr wchar_t kWindowTitle[] = L"WinActivate Manager";
 constexpr UINT kStatusReady = WM_APP + 1;
+constexpr UINT kActivationReady = WM_APP + 2;
+
+struct OperationResult {
+    SnapshotQueryResult status;
+    std::optional<ActivationError> error;
+};
 
 HWND AddControl(HWND parent, DWORD exStyle, const wchar_t* className,
                 const wchar_t* text, DWORD style, int id) {
@@ -50,7 +58,8 @@ MainWindow::~MainWindow() {
 }
 
 bool MainWindow::Create(int showCommand) {
-    WNDCLASSEXW windowClass{sizeof(windowClass)};
+    WNDCLASSEXW windowClass{};
+    windowClass.cbSize = sizeof(windowClass);
     windowClass.lpfnWndProc = WindowProcedure;
     windowClass.hInstance = instance_;
     windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
@@ -64,7 +73,7 @@ bool MainWindow::Create(int showCommand) {
 
     window_ = CreateWindowExW(
         0, kWindowClass, kWindowTitle, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
-        CW_USEDEFAULT, CW_USEDEFAULT, 820, 660, nullptr, nullptr, instance_, this);
+        CW_USEDEFAULT, CW_USEDEFAULT, 860, 740, nullptr, nullptr, instance_, this);
     if (window_ == nullptr) {
         return false;
     }
@@ -112,7 +121,7 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
 
         case WM_GETMINMAXINFO: {
             auto* info = reinterpret_cast<MINMAXINFO*>(lParam);
-            info->ptMinTrackSize = {720, 620};
+            info->ptMinTrackSize = {820, 730};
             return 0;
         }
 
@@ -122,15 +131,6 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
 
         case WM_COMMAND:
             switch (LOWORD(wParam)) {
-                case IDC_SHOW_KEY: {
-                    const HWND edit = GetDlgItem(window_, IDC_PRODUCT_KEY);
-                    const bool checked =
-                        SendMessageW(GetDlgItem(window_, IDC_SHOW_KEY), BM_GETCHECK,
-                                     0, 0) == BST_CHECKED;
-                    SendMessageW(edit, EM_SETPASSWORDCHAR, checked ? 0 : 0x25CF, 0);
-                    InvalidateRect(edit, nullptr, TRUE);
-                    return 0;
-                }
                 case IDC_OPEN_SETTINGS:
                     OpenActivationSettings();
                     return 0;
@@ -145,10 +145,10 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                     StartRefresh();
                     return 0;
                 case IDC_ACTIVATE_EXISTING:
-                case IDC_INSTALL_ACTIVATE:
-                    MessageBoxW(window_,
-                                L"Activation changes are introduced after the read-only status phase.",
-                                kWindowTitle, MB_OK | MB_ICONINFORMATION);
+                    StartActivation(false);
+                    return 0;
+                case IDC_ACTIVATE_KMS:
+                    StartActivation(true);
                     return 0;
                 case IDC_DIAGNOSTICS:
                     ShowDiagnostics();
@@ -164,6 +164,33 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             FinishRefresh(std::move(*result));
             return 0;
         }
+
+        case kActivationReady: {
+            std::unique_ptr<OperationResult> result(reinterpret_cast<OperationResult*>(lParam));
+            FinishRefresh(std::move(result->status));
+            if (result->error) {
+                const std::wstring details = DescribeActivationError(*result->error);
+                lastError_ = std::move(result->error);
+                SetWindowTextW(GetDlgItem(window_, IDC_PROGRESS), details.c_str());
+            } else if (!lastError_ && lastSnapshot_ && lastSnapshot_->chosen &&
+                       lastSnapshot_->chosen->licenseStatus == 1) {
+                SetWindowTextW(GetDlgItem(window_, IDC_PROGRESS),
+                    L"Windows confirms this PC is activated. See the reported channel and remaining time above.");
+            } else if (!lastError_) {
+                SetWindowTextW(GetDlgItem(window_, IDC_PROGRESS),
+                    L"Activation is not confirmed by Windows. Connect to the company network or VPN, then contact IT.");
+            }
+            return 0;
+        }
+
+        case WM_CLOSE:
+            if (busy_) {
+                SetWindowTextW(GetDlgItem(window_, IDC_PROGRESS),
+                    L"Please wait for the current Windows operation to finish before closing.");
+                return 0;
+            }
+            DestroyWindow(window_);
+            return 0;
 
         case WM_CTLCOLORSTATIC: {
             const HDC device = reinterpret_cast<HDC>(wParam);
@@ -189,7 +216,8 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
 }
 
 void MainWindow::CreateControls() {
-    NONCLIENTMETRICSW metrics{sizeof(metrics)};
+    NONCLIENTMETRICSW metrics{};
+    metrics.cbSize = sizeof(metrics);
     if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics,
                               0)) {
         font_ = CreateFontIndirectW(&metrics.lfMessageFont);
@@ -210,7 +238,7 @@ void MainWindow::CreateControls() {
         AddControl(window_, 0, L"STATIC", L"Windows activation", labelStyle,
                    IDC_HEADER),
         AddControl(window_, 0, L"STATIC",
-                   L"Check this PC's genuine Windows license and open official activation tools.",
+                   L"Activate or renew your company Windows license. Connect to the company network or VPN.",
                    labelStyle, IDC_SUBTITLE),
         AddControl(window_, 0, L"BUTTON", L"License status", BS_GROUPBOX,
                    IDC_STATUS_GROUP),
@@ -234,25 +262,27 @@ void MainWindow::CreateControls() {
                    IDC_CHANNEL_LABEL),
         AddControl(window_, 0, L"STATIC", L"Unknown", labelStyle,
                    IDC_CHANNEL_VALUE),
+        AddControl(window_, 0, L"STATIC", L"KMS validity", labelStyle, IDC_REMAINING_LABEL),
+        AddControl(window_, 0, L"STATIC", L"Not checked", labelStyle, IDC_REMAINING_VALUE),
         AddControl(window_, 0, L"BUTTON", L"Refresh status", WS_TABSTOP | BS_PUSHBUTTON,
                    IDC_REFRESH),
         AddControl(window_, 0, L"BUTTON", L"Activate existing license",
                    WS_TABSTOP | BS_PUSHBUTTON, IDC_ACTIVATE_EXISTING),
-        AddControl(window_, 0, L"BUTTON", L"Product key", BS_GROUPBOX,
+        AddControl(window_, 0, L"BUTTON", L"Company KMS activation", BS_GROUPBOX,
                    IDC_KEY_GROUP),
-        AddControl(window_, 0, L"STATIC", L"Enter a product key you already own",
+        AddControl(window_, 0, L"STATIC", L"Company server (optional; leave blank to use Windows configuration / DNS discovery)",
                    labelStyle, IDC_KEY_PROMPT),
         AddControl(window_, WS_EX_CLIENTEDGE, L"EDIT", L"",
-                   WS_TABSTOP | ES_AUTOHSCROLL | ES_PASSWORD, IDC_PRODUCT_KEY),
-        AddControl(window_, 0, L"BUTTON", L"Show", WS_TABSTOP | BS_AUTOCHECKBOX,
-                   IDC_SHOW_KEY),
-        AddControl(window_, 0, L"BUTTON", L"Install key && activate",
-                   WS_TABSTOP | BS_DEFPUSHBUTTON, IDC_INSTALL_ACTIVATE),
+                   WS_TABSTOP | ES_AUTOHSCROLL, IDC_KMS_HOST),
+        AddControl(window_, 0, L"STATIC", L"Port", labelStyle, IDC_KMS_PORT_LABEL),
+        AddControl(window_, WS_EX_CLIENTEDGE, L"EDIT", L"1688", WS_TABSTOP | ES_NUMBER, IDC_KMS_PORT),
+        AddControl(window_, 0, L"BUTTON", L"Activate / renew with KMS",
+                   WS_TABSTOP | BS_DEFPUSHBUTTON, IDC_ACTIVATE_KMS),
         AddControl(window_, 0, L"STATIC",
-                   L"Use a genuine 25-character key that matches this Windows edition.",
+                   L"No personal key needed. Uses the public setup key for this edition if needed.",
                    labelStyle, IDC_KEY_HINT),
         AddControl(window_, 0, L"STATIC",
-                   L"Preview build: activation actions are disabled until the secure elevated helper is complete.",
+                   L"An entered server updates Windows KMS settings. Use the server supplied by your IT team.",
                    labelStyle, IDC_PREVIEW_NOTE),
         AddControl(window_, 0, L"BUTTON", L"Activity", BS_GROUPBOX,
                    IDC_ACTIVITY_GROUP),
@@ -264,7 +294,7 @@ void MainWindow::CreateControls() {
         AddControl(window_, 0, L"BUTTON", L"Open Windows Activation Settings",
                    WS_TABSTOP | BS_PUSHBUTTON, IDC_OPEN_SETTINGS),
         AddControl(window_, 0, L"STATIC",
-                   L"No key is stored or uploaded by this application.",
+                   L"Uses Windows licensing APIs. Activation contacts your KMS infrastructure. No app telemetry.",
                    labelStyle, IDC_PRIVACY_NOTE),
         AddControl(window_, 0, L"BUTTON", L"About", WS_TABSTOP | BS_PUSHBUTTON,
                    IDC_ABOUT),
@@ -281,11 +311,14 @@ void MainWindow::CreateControls() {
         SendMessageW(GetDlgItem(window_, IDC_LICENSE_VALUE), WM_SETFONT,
                      reinterpret_cast<WPARAM>(statusFont_), TRUE);
     }
-    SendMessageW(GetDlgItem(window_, IDC_PRODUCT_KEY), EM_SETLIMITTEXT, 64, 0);
-    SendMessageW(GetDlgItem(window_, IDC_PRODUCT_KEY), EM_SETCUEBANNER, TRUE,
-                 reinterpret_cast<LPARAM>(L"XXXXX-XXXXX-XXXXX-XXXXX-XXXXX"));
+    SendMessageW(GetDlgItem(window_, IDC_KMS_HOST), EM_SETLIMITTEXT, 253, 0);
+    SendMessageW(GetDlgItem(window_, IDC_KMS_PORT), EM_SETLIMITTEXT, 5, 0);
+    SendMessageW(GetDlgItem(window_, IDC_KMS_HOST), EM_SETCUEBANNER, TRUE,
+                 reinterpret_cast<LPARAM>(L"Automatic / existing configuration"));
+    SendMessageW(GetDlgItem(window_, IDC_ACTIVATE_KMS), BCM_SETSHIELD, 0, TRUE);
+    SendMessageW(GetDlgItem(window_, IDC_ACTIVATE_EXISTING), BCM_SETSHIELD, 0, TRUE);
     EnableWindow(GetDlgItem(window_, IDC_ACTIVATE_EXISTING), FALSE);
-    EnableWindow(GetDlgItem(window_, IDC_INSTALL_ACTIVATE), FALSE);
+    EnableWindow(GetDlgItem(window_, IDC_ACTIVATE_KMS), FALSE);
 }
 
 void MainWindow::LayoutControls(int width, int height) {
@@ -304,13 +337,13 @@ void MainWindow::LayoutControls(int width, int height) {
 
     const int statusTop = 88;
     MoveWindow(GetDlgItem(window_, IDC_STATUS_GROUP), margin, statusTop,
-               contentWidth, 196, TRUE);
-    const std::array<int, 5> labelIds{IDC_WINDOWS_LABEL, IDC_BUILD_LABEL,
+               contentWidth, 224, TRUE);
+    const std::array<int, 6> labelIds{IDC_WINDOWS_LABEL, IDC_BUILD_LABEL,
                                       IDC_LICENSE_LABEL, IDC_PARTIAL_KEY_LABEL,
-                                      IDC_CHANNEL_LABEL};
-    const std::array<int, 5> valueIds{IDC_WINDOWS_VALUE, IDC_BUILD_VALUE,
+                                      IDC_CHANNEL_LABEL, IDC_REMAINING_LABEL};
+    const std::array<int, 6> valueIds{IDC_WINDOWS_VALUE, IDC_BUILD_VALUE,
                                       IDC_LICENSE_VALUE, IDC_PARTIAL_KEY_VALUE,
-                                      IDC_CHANNEL_VALUE};
+                                      IDC_CHANNEL_VALUE, IDC_REMAINING_VALUE};
     int row = statusTop + 28;
     for (std::size_t index = 0; index < valueIds.size(); ++index) {
         MoveWindow(GetDlgItem(window_, labelIds[index]), margin + 24, row,
@@ -319,24 +352,26 @@ void MainWindow::LayoutControls(int width, int height) {
                    valueWidth, 24, TRUE);
         row += 28;
     }
-    MoveWindow(GetDlgItem(window_, IDC_REFRESH), margin + 24, statusTop + 154,
+    MoveWindow(GetDlgItem(window_, IDC_REFRESH), margin + 24, statusTop + 182,
                132, 30, TRUE);
     MoveWindow(GetDlgItem(window_, IDC_ACTIVATE_EXISTING), margin + 168,
-               statusTop + 154, 202, 30, TRUE);
+               statusTop + 182, 202, 30, TRUE);
 
-    const int keyTop = statusTop + 208;
+    const int keyTop = statusTop + 236;
     MoveWindow(GetDlgItem(window_, IDC_KEY_GROUP), margin, keyTop, contentWidth,
                150, TRUE);
     MoveWindow(GetDlgItem(window_, IDC_KEY_PROMPT), margin + 24, keyTop + 26,
                contentWidth - 48, 22, TRUE);
-    MoveWindow(GetDlgItem(window_, IDC_PRODUCT_KEY), margin + 24, keyTop + 52,
-               contentWidth - 48 - 88, 30, TRUE);
-    MoveWindow(GetDlgItem(window_, IDC_SHOW_KEY), width - margin - 24 - 78,
+    MoveWindow(GetDlgItem(window_, IDC_KMS_HOST), margin + 24, keyTop + 52,
+               contentWidth - 48 - 132, 30, TRUE);
+    MoveWindow(GetDlgItem(window_, IDC_KMS_PORT_LABEL), width - margin - 24 - 122,
+               keyTop + 57, 38, 24, TRUE);
+    MoveWindow(GetDlgItem(window_, IDC_KMS_PORT), width - margin - 24 - 78,
                keyTop + 52, 78, 30, TRUE);
     MoveWindow(GetDlgItem(window_, IDC_KEY_HINT), margin + 24, keyTop + 88,
-               contentWidth - 260, 22, TRUE);
-    MoveWindow(GetDlgItem(window_, IDC_INSTALL_ACTIVATE), width - margin - 24 - 196,
-               keyTop + 86, 196, 32, TRUE);
+               contentWidth - 292, 28, TRUE);
+    MoveWindow(GetDlgItem(window_, IDC_ACTIVATE_KMS), width - margin - 24 - 230,
+               keyTop + 86, 230, 32, TRUE);
     MoveWindow(GetDlgItem(window_, IDC_PREVIEW_NOTE), margin + 24, keyTop + 118,
                contentWidth - 48, 22, TRUE);
 
@@ -402,9 +437,9 @@ void MainWindow::FinishRefresh(SnapshotQueryResult result) {
     if (worker_.joinable()) {
         worker_.join();
     }
-    SetBusy(false);
     lastSnapshot_ = result.snapshot;
     lastError_ = result.error;
+    SetBusy(false);
 
     const OsInfo& os = result.snapshot.os;
     std::wstring windowsText = L"Unsupported or unknown";
@@ -423,6 +458,7 @@ void MainWindow::FinishRefresh(SnapshotQueryResult result) {
         SetWindowTextW(GetDlgItem(window_, IDC_LICENSE_VALUE), L"Unknown (query failed)");
         SetWindowTextW(GetDlgItem(window_, IDC_PARTIAL_KEY_VALUE), L"Not available");
         SetWindowTextW(GetDlgItem(window_, IDC_CHANNEL_VALUE), L"Unknown");
+        SetWindowTextW(GetDlgItem(window_, IDC_REMAINING_VALUE), L"Unknown (query failed)");
         const std::wstring errorText = DescribeActivationError(*result.error);
         SetWindowTextW(GetDlgItem(window_, IDC_PROGRESS), errorText.c_str());
         InvalidateRect(GetDlgItem(window_, IDC_LICENSE_VALUE), nullptr, TRUE);
@@ -463,6 +499,9 @@ void MainWindow::FinishRefresh(SnapshotQueryResult result) {
     }
     SetWindowTextW(GetDlgItem(window_, IDC_PARTIAL_KEY_VALUE), partial.c_str());
     SetWindowTextW(GetDlgItem(window_, IDC_CHANNEL_VALUE), channel.c_str());
+    const auto remaining = result.snapshot.chosen
+        ? KmsRemainingText(*result.snapshot.chosen) : L"Not available";
+    SetWindowTextW(GetDlgItem(window_, IDC_REMAINING_VALUE), remaining.c_str());
     SetWindowTextW(GetDlgItem(window_, IDC_PROGRESS), result.snapshot.reason.c_str());
     InvalidateRect(GetDlgItem(window_, IDC_LICENSE_VALUE), nullptr, TRUE);
 }
@@ -470,6 +509,60 @@ void MainWindow::FinishRefresh(SnapshotQueryResult result) {
 void MainWindow::SetBusy(bool busy) {
     busy_ = busy;
     EnableWindow(GetDlgItem(window_, IDC_REFRESH), busy ? FALSE : TRUE);
+    const bool supported = !busy && !lastError_ && lastSnapshot_ &&
+        lastSnapshot_->os.isSupported && !lastSnapshot_->selectionIsAmbiguous && lastSnapshot_->chosen;
+    EnableWindow(GetDlgItem(window_, IDC_ACTIVATE_EXISTING), supported);
+    const bool kmsEligible = supported && (IsKmsClient(*lastSnapshot_->chosen) ||
+        !KmsClientSetupKey(lastSnapshot_->os.sku).empty());
+    EnableWindow(GetDlgItem(window_, IDC_ACTIVATE_KMS), kmsEligible);
+    EnableWindow(GetDlgItem(window_, IDC_KMS_HOST), !busy);
+    EnableWindow(GetDlgItem(window_, IDC_KMS_PORT), !busy);
+}
+
+void MainWindow::StartActivation(bool kms) {
+    if (busy_ || closing_.load() || !lastSnapshot_ || !lastSnapshot_->chosen ||
+        !lastSnapshot_->os.isSupported || lastSnapshot_->selectionIsAmbiguous) return;
+    if (kms && lastSnapshot_->chosen->licenseStatus == 1 && !IsKmsClient(*lastSnapshot_->chosen)) {
+        SetWindowTextW(GetDlgItem(window_, IDC_PROGRESS),
+            L"Windows is already activated with another license channel. The working license has been preserved.");
+        return;
+    }
+    HelperRequest request{};
+    request.command = kms ? HelperCommand::ActivateKms : HelperCommand::ActivateExisting;
+    if (kms) {
+        GetWindowTextW(GetDlgItem(window_, IDC_KMS_HOST), request.host, 254);
+        wchar_t portText[8]{};
+        GetWindowTextW(GetDlgItem(window_, IDC_KMS_PORT), portText, 8);
+        std::uint32_t port = 0;
+        bool valid = portText[0] != 0;
+        for (const wchar_t* c = portText; *c; ++c) {
+            if (*c < L'0' || *c > L'9') { valid = false; break; }
+            port = port * 10 + static_cast<std::uint32_t>(*c - L'0');
+        }
+        request.port = port;
+        if (!valid || !ValidateRequest(request, sizeof(request))) {
+            SetWindowTextW(GetDlgItem(window_, IDC_PROGRESS),
+                L"Enter a company hostname (no URL or :port) and port 1-65535. For automatic configuration leave the server blank and port 1688.");
+            return;
+        }
+    }
+    if (worker_.joinable()) worker_.join();
+    SetBusy(true);
+    SetWindowTextW(GetDlgItem(window_, IDC_PROGRESS),
+        L"Requesting administrator approval, activating through Windows, then verifying status. This can take a few minutes.");
+    worker_ = std::thread([this, request] {
+        auto result = std::make_unique<OperationResult>();
+        try {
+            result->error = RunElevatedHelper(request, window_);
+            WmiLicensingBackend reader;
+            result->status = reader.QuerySnapshot();
+        } catch (...) {
+            result->status.error = ActivationError{ActivationStage::Query, {}, {},
+                L"The operation stopped unexpectedly. Refresh Windows status before retrying.", {}};
+        }
+        if (!closing_.load() && PostMessageW(window_, kActivationReady, 0,
+                reinterpret_cast<LPARAM>(result.get()))) result.release();
+    });
 }
 
 void MainWindow::ShowDiagnostics() {
@@ -496,6 +589,12 @@ void MainWindow::ShowDiagnostics() {
              << L"\nLicense status: " << lastSnapshot_->chosen->licenseStatus
              << L"\nStatus reason: "
              << FormatErrorCode(lastSnapshot_->chosen->licenseStatusReason);
+        const auto& record = *lastSnapshot_->chosen;
+        text << L"\nKMS client: " << (IsKmsClient(record) ? L"Yes" : L"No")
+             << L"\nKMS validity: " << KmsRemainingText(record)
+             << L"\nConfigured KMS host (product): " << (record.kmsHost.empty() ? L"Not reported" : record.kmsHost)
+             << L"\nDiscovered KMS host: " << (record.discoveredKmsHost.empty() ? L"Not reported" : record.discoveredKmsHost);
+        if (record.kmsPort) text << L"\nConfigured KMS port: " << *record.kmsPort;
     }
     if (lastError_.has_value()) {
         text << L"\n\n" << DescribeActivationError(*lastError_);

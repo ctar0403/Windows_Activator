@@ -6,6 +6,7 @@
 
 #include <string_view>
 #include <vector>
+#include "common/LicensingBackend.h"
 
 namespace winactivate {
 
@@ -23,6 +24,9 @@ public:
     [[nodiscard]] HRESULT Query(
         std::wstring_view wql,
         std::vector<Microsoft::WRL::ComPtr<IWbemClassObject>>& results) const;
+    [[nodiscard]] BackendCallResult CallMethod(
+        std::wstring_view path, const wchar_t* method,
+        const wchar_t* parameter = nullptr, const VARIANT* value = nullptr) const;
 
 private:
     bool comInitialized_{};

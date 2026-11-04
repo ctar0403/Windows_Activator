@@ -27,8 +27,11 @@ if not defined CMAKE_EXE if exist "%ProgramFiles%\CMake\bin\cmake.exe" set "CMAK
 
 if not defined CMAKE_EXE (
     set "GXX_EXE="
+    rem Prefer the current MSYS2 compiler over legacy Dev-Cpp/TDM installations.
+    if exist "C:\msys64\mingw64\bin\g++.exe" set "GXX_EXE=C:\msys64\mingw64\bin\g++.exe"
     for /f "delims=" %%I in ('where g++.exe 2^>nul') do if not defined GXX_EXE set "GXX_EXE=%%I"
     if not defined GXX_EXE if exist "C:\PROGRA~2\Embarcadero\Dev-Cpp\TDM-GCC-64\bin\g++.exe" set "GXX_EXE=C:\PROGRA~2\Embarcadero\Dev-Cpp\TDM-GCC-64\bin\g++.exe"
+    if not defined GXX_EXE if exist "C:\msys64\mingw64\bin\g++.exe" set "GXX_EXE=C:\msys64\mingw64\bin\g++.exe"
     if defined GXX_EXE goto :build_mingw
     echo [ERROR] No supported compiler toolchain was found.
     echo Install Visual Studio 2022 with "Desktop development with C++" and CMake tools.
@@ -55,17 +58,21 @@ echo [4/4] Preparing test executable...
 if not exist "dist" mkdir "dist"
 copy /Y "!BUILD_DIR!\!CONFIG!\WinActivate.exe" "dist\WinActivate.exe" >nul
 if errorlevel 1 goto :failed
+copy /Y "!BUILD_DIR!\!CONFIG!\WinActivateHelper.exe" "dist\WinActivateHelper.exe" >nul
+if errorlevel 1 goto :failed
 
 echo.
 echo Build complete:
 echo   %CD%\dist\WinActivate.exe
+echo   %CD%\dist\WinActivateHelper.exe
 echo.
-echo This preview reads Windows licensing status only. Activation actions are disabled.
+echo Keep both executables together. Activation requests administrator approval.
 goto :success
 
 :build_mingw
 for %%I in ("!GXX_EXE!") do set "GXX_EXE=%%~sI"
 for %%I in ("!GXX_EXE!") do set "MINGW_BIN=%%~dpI"
+set "PATH=!MINGW_BIN!;!PATH!"
 set "WINDRES_EXE=!MINGW_BIN!windres.exe"
 set "BUILD_DIR=build\mingw-x64"
 set "OPT_FLAGS=-O2 -s"
@@ -74,7 +81,7 @@ if not exist "!BUILD_DIR!" mkdir "!BUILD_DIR!"
 
 echo [INFO] Visual Studio/CMake was not found; using the MinGW preview fallback.
 echo [1/4] Compiling safe unit tests...
-"!GXX_EXE!" -std=c++2a -Wall -Wextra -Wpedantic -DUNICODE -D_UNICODE -Isrc -Itests tests\TestsMain.cpp tests\KeyValidationTests.cpp tests\OsDetectionTests.cpp tests\ProductSelectionTests.cpp tests\ErrorMappingTests.cpp tests\MockBackendTests.cpp src\common\KeyValidation.cpp src\common\FormatError.cpp src\core\OsDetector.cpp src\core\ProductSelection.cpp src\core\ActivationWorkflow.cpp src\core\MockLicensingBackend.cpp -o "!BUILD_DIR!\WinActivateTests.exe"
+"!GXX_EXE!" -std=c++2a -static -Wall -Wextra -Wpedantic -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 -Isrc -Itests tests\TestsMain.cpp tests\KeyValidationTests.cpp tests\OsDetectionTests.cpp tests\ProductSelectionTests.cpp tests\ErrorMappingTests.cpp tests\MockBackendTests.cpp tests\KmsWorkflowTests.cpp tests\IpcProtocolTests.cpp tests\HelperTransportTests.cpp src\common\KeyValidation.cpp src\common\FormatError.cpp src\common\KmsOptions.cpp src\common\IpcProtocol.cpp src\common\HelperTransport.cpp src\core\OsDetector.cpp src\core\ProductSelection.cpp src\core\ActivationWorkflow.cpp src\core\KmsWorkflow.cpp src\core\MockLicensingBackend.cpp -lshell32 -ladvapi32 -lole32 -o "!BUILD_DIR!\WinActivateTests.exe"
 if errorlevel 1 goto :failed
 
 echo [2/4] Running safe, mock-backed tests...
@@ -84,16 +91,26 @@ if errorlevel 1 goto :failed
 echo [3/4] Compiling resources and interface...
 "!WINDRES_EXE!" -DUNICODE -D_UNICODE -Isrc\gui src\gui\Resources.rc -O coff -o "!BUILD_DIR!\Resources.o"
 if errorlevel 1 goto :failed
-"!GXX_EXE!" -std=c++2a !OPT_FLAGS! -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 -Isrc -municode -mwindows src\gui\Main.cpp src\gui\MainWindow.cpp src\common\KeyValidation.cpp src\common\FormatError.cpp src\core\WmiConnection.cpp src\core\LicenseReader.cpp src\core\OsDetector.cpp src\core\ProductSelection.cpp src\core\ActivationWorkflow.cpp src\core\MockLicensingBackend.cpp "!BUILD_DIR!\Resources.o" -lcomctl32 -lshell32 -lgdi32 -lole32 -loleaut32 -lwbemuuid -o "!BUILD_DIR!\WinActivate.exe"
+set "COMMON_SOURCES=src\common\KeyValidation.cpp src\common\FormatError.cpp src\common\KmsOptions.cpp src\common\IpcProtocol.cpp src\common\HelperTransport.cpp"
+set "CORE_SOURCES=src\core\WmiConnection.cpp src\core\LicenseReader.cpp src\core\LicenseActivator.cpp src\core\OsDetector.cpp src\core\ProductSelection.cpp src\core\ActivationWorkflow.cpp src\core\KmsWorkflow.cpp"
+set "WINDOWS_LIBS=-static -lshell32 -ladvapi32 -lole32 -loleaut32 -lwbemuuid"
+"!GXX_EXE!" -std=c++2a !OPT_FLAGS! -Wall -Wextra -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 -Isrc -municode -mwindows src\gui\Main.cpp src\gui\MainWindow.cpp !COMMON_SOURCES! !CORE_SOURCES! "!BUILD_DIR!\Resources.o" -lcomctl32 -lgdi32 !WINDOWS_LIBS! -o "!BUILD_DIR!\WinActivate.exe"
+if errorlevel 1 goto :failed
+"!WINDRES_EXE!" -DUNICODE -D_UNICODE -Isrc\helper src\helper\Resources.rc -O coff -o "!BUILD_DIR!\HelperResources.o"
+if errorlevel 1 goto :failed
+"!GXX_EXE!" -std=c++2a !OPT_FLAGS! -Wall -Wextra -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 -Isrc -municode -mwindows src\helper\HelperMain.cpp !COMMON_SOURCES! !CORE_SOURCES! "!BUILD_DIR!\HelperResources.o" !WINDOWS_LIBS! -o "!BUILD_DIR!\WinActivateHelper.exe"
 if errorlevel 1 goto :failed
 
 echo [4/4] Preparing test executable...
 if not exist "dist" mkdir "dist"
 copy /Y "!BUILD_DIR!\WinActivate.exe" "dist\WinActivate.exe" >nul
 if errorlevel 1 goto :failed
+copy /Y "!BUILD_DIR!\WinActivateHelper.exe" "dist\WinActivateHelper.exe" >nul
+if errorlevel 1 goto :failed
 echo.
 echo MinGW preview build complete:
 echo   %CD%\dist\WinActivate.exe
+echo   %CD%\dist\WinActivateHelper.exe
 echo.
 echo Use the Visual Studio/CMake path for authoritative release validation.
 goto :success

@@ -1,13 +1,13 @@
 #pragma once
 
-#include "common/LicensingBackend.h"
+#include "core/KmsWorkflow.h"
 
 #include <deque>
 #include <string>
 
 namespace winactivate {
 
-class MockLicensingBackend final : public IActivationBackend {
+class MockLicensingBackend final : public IKmsBackend {
 public:
     std::deque<SnapshotQueryResult> snapshots;
     BackendCallResult installResult{true, {}, 0};
@@ -20,6 +20,15 @@ public:
     std::size_t refreshCalls{};
     std::wstring lastActivatedPath;
     bool receivedNormalizedKey{};
+    BackendCallResult configureResult{true, {}, 0};
+    std::size_t configureCalls{};
+    KmsOptions lastKmsOptions;
+    [[nodiscard]] BackendCallResult ConfigureKms(
+        std::wstring_view, const KmsOptions& options) override {
+        ++configureCalls;
+        lastKmsOptions = options;
+        return configureResult;
+    }
 
     [[nodiscard]] SnapshotQueryResult QuerySnapshot() override;
     [[nodiscard]] BackendCallResult InstallProductKey(

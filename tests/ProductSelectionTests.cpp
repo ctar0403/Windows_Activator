@@ -87,3 +87,25 @@ TEST_CASE("a keyed matching record is preferred over an unkeyed record") {
     REQUIRE(snapshot.status == winactivate::LicenseSummaryStatus::Activated);
 }
 
+TEST_CASE("exact Windows license families keep KMS editions separate") {
+    const std::vector<std::pair<std::uint32_t, std::wstring>> editions{
+        {48, L"Professional"}, {49, L"ProfessionalN"},
+        {4, L"Enterprise"}, {27, L"EnterpriseN"},
+        {121, L"Education"}, {122, L"EducationN"},
+        {161, L"ProfessionalWorkstation"}, {162, L"ProfessionalWorkstationN"},
+    };
+    std::vector<winactivate::LicenseRecord> records;
+    for (const auto& [sku, family] : editions) {
+        auto record = Record(std::to_wstring(sku), L"Windows(R), " + family + L" edition", 0);
+        record.licenseFamily = family;
+        records.push_back(std::move(record));
+    }
+    for (const auto& [sku, family] : editions) {
+        const auto os = winactivate::ClassifyWindows(L"10.0", L"26100", L"Windows 11", sku, 1);
+        const auto snapshot = winactivate::SelectApplicableProduct(os, records);
+        REQUIRE(!snapshot.selectionIsAmbiguous);
+        REQUIRE(snapshot.chosen);
+        REQUIRE(snapshot.chosen->licenseFamily == family);
+    }
+}
+

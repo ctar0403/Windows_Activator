@@ -1,6 +1,7 @@
 #include "core/ProductSelection.h"
 
 #include <algorithm>
+#include <array>
 #include <cwctype>
 #include <string_view>
 
@@ -25,6 +26,20 @@ bool Contains(const std::wstring& text, std::wstring_view term) {
 }
 
 bool MatchesInstalledEdition(std::uint32_t sku, const LicenseRecord& record) {
+    // LicenseFamily is stable across UI languages. Match exact known families
+    // before display strings so EnterpriseN never matches Enterprise, etc.
+    const auto family = Lower(record.licenseFamily);
+    const std::array<std::pair<std::wstring_view, std::uint32_t>, 13> families{{
+        {L"professional", 48}, {L"professionaln", 49},
+        {L"enterprise", 4}, {L"enterprisen", 27},
+        {L"education", 121}, {L"educationn", 122},
+        {L"professionalworkstation", 161}, {L"professionalworkstationn", 162},
+        {L"core", 101}, {L"coren", 98}, {L"coresinglelanguage", 100},
+        {L"enterprises", 125}, {L"enterprisesn", 126},
+    }};
+    for (const auto& [name, familySku] : families) {
+        if (family == name) return sku == familySku;
+    }
     const std::wstring text = Lower(record.name + L" " + record.licenseFamily +
                                     L" " + record.description);
     switch (sku) {
