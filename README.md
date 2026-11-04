@@ -4,6 +4,17 @@ Native Windows 10/11 x64 desktop app for company KMS activation and renewal.
 Members do not need to enter a personal product key. The app uses documented
 Windows licensing APIs and your organization's activation infrastructure.
 
+## Download
+
+**[Download WinActivate.exe for Windows](https://github.com/ctar0403/Windows_Activator/releases/download/runnable/WinActivate.exe)**
+
+Windows 10 / 11 · 64-bit (x64) · Direct executable download
+
+[View release details and available files](https://github.com/ctar0403/Windows_Activator/releases/tag/runnable)
+
+For activation with the current version, keep `WinActivateHelper.exe` in the
+same folder as `WinActivate.exe`. Both files are required.
+
 ## Use
 
 1. Keep `WinActivate.exe` and `WinActivateHelper.exe` in the same folder.
